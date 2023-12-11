@@ -1,5 +1,5 @@
 # Name: VirtualTableDump.py
-# Version: 3.8.0
+# Version: 3.8.1
 # Author: RenardDev (zeze839@gmail.com)
 
 # IDA
@@ -458,7 +458,7 @@ def DecompileVirtualTablesFunctions(tables, declare, include):
 					args = [ decompiled_function.type.get_nth_arg(x) for x in range(1, decompiled_function.type.get_nargs()) ]
 
 					end_return_type = GetEndType(decompiled_function.type.get_rettype())
-					if end_return_type.is_func() | (end_return_type.is_int128() & decompiled_function.type.get_rettype().is_ptr()):
+					if end_return_type.is_func() | ((end_return_type.is_int128() | end_return_type.is_sse_type()) & decompiled_function.type.get_rettype().is_ptr()):
 						return_type = 'void*'
 
 					return_type = '*'.join(return_type.rsplit(' *'))
@@ -499,28 +499,28 @@ def DecompileVirtualTablesFunctions(tables, declare, include):
 						function_name = f'NonNamed_{unk_functions}'
 						unk_functions += 1
 					if (function_name == '`scalar deleting destructor\'') | (function_name == '`vector deleting destructor\''):
-						#function_string = f'virtual ~{table_name}() = 0;'
-						function_string = f'virtual void deconstructor_{table_name}() = 0;'
+						function_string = f'virtual ~{table_name}() = 0;'
+						#function_string = f'virtual void deconstructor_{table_name}() = 0;'
 						found_dup = 0
 						for func, func_str, func_name, func_ret, func_args, real_funcname in functions:
 							if func_str == function_string:
 								found_dup += 1
 						if found_dup:
-							#function_string = f'virtual ~{function_name}{found_dup + 1}() = 0;'
-							function_string = f'virtual void deconstructor_{function_name}{found_dup + 1}() = 0;'
+							function_string = f'virtual ~{function_name}{found_dup + 1}() = 0;'
+							#function_string = f'virtual void deconstructor_{function_name}{found_dup + 1}() = 0;'
 							continue # Not exist 2nd dcotr for Windows
 						functions.append((function, function_string, function_name, '', [], function_name))
 						continue
 					elif (function_name[0] == '~') | (function_name_parts[0] == function_name_parts[-1][1:]):
-						#function_string = f'virtual ~{table_name}() = 0;'
-						function_string = f'virtual void deconstructor_{table_name}() = 0;'
+						function_string = f'virtual ~{table_name}() = 0;'
+						#function_string = f'virtual void deconstructor_{table_name}() = 0;'
 						found_dup = 0
 						for func, func_str, func_name, func_ret, func_args, real_funcname in functions:
 							if func_str == function_string:
 								found_dup += 1
 						if found_dup:
-							#function_string = f'virtual ~{table_name}{found_dup + 1}() = 0;'
-							function_string = f'virtual void deconstructor_{table_name}{found_dup + 1}() = 0;'
+							function_string = f'virtual ~{table_name}{found_dup + 1}() = 0;'
+							#function_string = f'virtual void deconstructor_{table_name}{found_dup + 1}() = 0;'
 							continue # Not exist 2nd dcotr for Windows
 						functions.append((function, function_string, function_name, '', [], function_name))
 						continue
@@ -583,7 +583,7 @@ def DecompileVirtualTablesFunctions(tables, declare, include):
 								arg_type = arg.dstr()
 
 							end_arg_type = GetEndType(arg)
-							if end_arg_type.is_func() | (end_arg_type.is_int128() & arg.is_ptr()):
+							if end_arg_type.is_func() | ((end_arg_type.is_int128() | end_arg_type.is_sse_type()) & arg.is_ptr()):
 								arg_type = 'void*'
 
 							arg_type = '*'.join(arg_type.rsplit(' *'))
@@ -773,9 +773,7 @@ class VirtualTableDump(ida_idaapi.plugin_t):
 											if found_base != True:
 												code_bases += f'class {base}' + ' {};\n'
 											else:
-												code_bases += f'class {base}; // Unexpected include\n'
-										#if base == 'ConVar':
-										#	print(f'ConVar = {found_base} {base_is_known}')
+												code_bases += f'class {base}; // Unexpected\n'
 										bases_public.append(f'public {base}')
 
 									bases_public = ', '.join(bases_public)
@@ -783,6 +781,8 @@ class VirtualTableDump(ida_idaapi.plugin_t):
 									code += f'class {table_name} : {bases_public} ' + '{\n'
 								else:
 									code += f'class {table_name} ' + '{\n'
+
+								code += 'public:\n'
 
 								known_tables.append(table_name)
 
