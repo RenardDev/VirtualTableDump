@@ -1,5 +1,5 @@
 # Name: VirtualTableDump.py
-# Version: 3.0.0
+# Version: 3.8.0
 # Author: RenardDev (zeze839@gmail.com)
 
 # IDA
@@ -15,6 +15,7 @@ import idautils
 import idaapi
 import ida_nalt
 import ida_funcs
+import ida_typeinf
 import idc
 
 # Python
@@ -49,9 +50,12 @@ def IsNotValidAddress(address:int) -> bool:
 def FormatTypeName(type_name:str) -> str:
 	type_name = re.sub('`[^`\']*\'', '', type_name)
 	type_name = type_name.replace('::', '_')
+	type_name = type_name.replace('(', '_')
 	type_name = type_name.replace('<', '_')
 	type_name = type_name.replace(',', '_')
 	type_name = type_name.replace('>', '_')
+	type_name = type_name.replace('&', '_')
+	type_name = type_name.replace(')', '_')
 	type_name = re.sub('\\s+', '', type_name)
 	type_name = re.sub('\\(.*\\*\\)\\(.*\\)', '', type_name)
 	type_name = type_name.replace('*', '')
@@ -395,8 +399,33 @@ def SearchVirtualTables(types, result = None):
 
 	return result
 
-def DecompileVirtualTablesFunctions(tables):
+def IsKnownType(string):
+	tif = ida_typeinf.tinfo_t()
+	if ida_typeinf.parse_decl(tif, None, string + ';', ida_typeinf.PT_SIL) is None:
+		return (False, '')
+	while tif.is_ptr():
+		tif = tif.get_pointed_object()
+	tif.clr_const_volatile()
+	if tif.is_arithmetic() | tif.is_sse_type() | tif.is_func() | tif.is_void():
+		return (False, '')
+	return (True, tif.dstr())
+
+def GetTypeString(type):
+	tif = ida_typeinf.tinfo_t()
+	if ida_typeinf.parse_decl(tif, None, type.dstr() + ';', ida_typeinf.PT_SIL) is None:
+		return (False, '')
+	tif.clr_const_volatile()
+	return (True, tif.dstr())
+
+def GetEndType(tif):
+	while tif.is_ptr():
+		tif = tif.get_pointed_object()
+	return tif
+
+def DecompileVirtualTablesFunctions(tables, declare, include):
 	decompiled = []
+
+	known_functions = []
 
 	for table_type, table_name, table_address, table_functions in tables:
 		unk_functions = 1
@@ -420,8 +449,17 @@ def DecompileVirtualTablesFunctions(tables):
 					#	elif function_type_data.cc == idaapi.CM_CC_FASTCALL:
 					#		calling_convention = '__fastcall'
 
-					return_type = decompiled_function.type.get_rettype().dstr()
+					return_type = decompiled_function.type.get_rettype()
+					status, string = GetTypeString(return_type)
+					if status & (string != '?'):
+						return_type = string
+					else:
+						return_type = return_type.dstr()
 					args = [ decompiled_function.type.get_nth_arg(x) for x in range(1, decompiled_function.type.get_nargs()) ]
+
+					end_return_type = GetEndType(decompiled_function.type.get_rettype())
+					if end_return_type.is_func() | (end_return_type.is_int128() & decompiled_function.type.get_rettype().is_ptr()):
+						return_type = 'void*'
 
 					return_type = '*'.join(return_type.rsplit(' *'))
 					if (return_type == '_BOOL4') | (return_type == 'BOOL'):
@@ -432,8 +470,26 @@ def DecompileVirtualTablesFunctions(tables):
 						return_type = 'unsigned char*'
 					elif return_type == '_QWORD*':
 						return_type = 'unsigned long long*'
+					elif return_type == '_DWORD':
+						return_type = 'unsigned int'
 
-					return_type = return_type.replace('::', '_')
+					return_type = return_type.replace('::', '_').replace('class ', '').replace('struct ', '')
+
+					return_type_str = return_type.replace(' ', '').rsplit('&')[0].rsplit('*')[0].strip()
+					is_known = False
+					for known_table_type, known_table_name, known_table_address, known_table_functions in tables:
+						if known_table_name == return_type_str:
+							is_known = True
+							break
+
+					if is_known != True:
+						status, string = IsKnownType(decompiled_function.type.get_rettype().dstr().replace('::', '_').replace('class ', '').replace('struct ', ''))
+						if status & (string != '?'):
+							if string not in declare:
+								declare.append(string)
+					else:
+						if return_type_str not in include:
+							include.append(return_type_str)
 
 					function_name = ida_name.get_demangled_name(function, ida_name.M_PRCMSK | ida_name.MT_LOCALNAME, 0, ida_name.GN_DEMANGLED | ida_name.GN_STRICT | ida_name.GN_LOCAL)
 					function_name_parts = function_name.rsplit('::')
@@ -443,26 +499,30 @@ def DecompileVirtualTablesFunctions(tables):
 						function_name = f'NonNamed_{unk_functions}'
 						unk_functions += 1
 					if (function_name == '`scalar deleting destructor\'') | (function_name == '`vector deleting destructor\''):
-						function_string = f'virtual ~{table_name}() = 0;'
+						#function_string = f'virtual ~{table_name}() = 0;'
+						function_string = f'virtual void deconstructor_{table_name}() = 0;'
 						found_dup = 0
-						for func, func_str in functions:
+						for func, func_str, func_name, func_ret, func_args, real_funcname in functions:
 							if func_str == function_string:
 								found_dup += 1
 						if found_dup:
-							function_string = f'virtual ~{function_name}{found_dup + 1}() = 0;'
-							continue # Not exist 2nd dcotr
-						functions.append((function, function_string))
+							#function_string = f'virtual ~{function_name}{found_dup + 1}() = 0;'
+							function_string = f'virtual void deconstructor_{function_name}{found_dup + 1}() = 0;'
+							continue # Not exist 2nd dcotr for Windows
+						functions.append((function, function_string, function_name, '', [], function_name))
 						continue
 					elif (function_name[0] == '~') | (function_name_parts[0] == function_name_parts[-1][1:]):
-						function_string = f'virtual ~{table_name}() = 0;'
+						#function_string = f'virtual ~{table_name}() = 0;'
+						function_string = f'virtual void deconstructor_{table_name}() = 0;'
 						found_dup = 0
-						for func, func_str in functions:
+						for func, func_str, func_name, func_ret, func_args, real_funcname in functions:
 							if func_str == function_string:
 								found_dup += 1
 						if found_dup:
-							function_string = f'virtual ~{table_name}{found_dup + 1}() = 0;'
-							continue
-						functions.append((function, function_string))
+							#function_string = f'virtual ~{table_name}{found_dup + 1}() = 0;'
+							function_string = f'virtual void deconstructor_{table_name}{found_dup + 1}() = 0;'
+							continue # Not exist 2nd dcotr for Windows
+						functions.append((function, function_string, function_name, '', [], function_name))
 						continue
 					elif function_name[:4] == 'sub_':
 						return_type = 'void'
@@ -492,29 +552,110 @@ def DecompileVirtualTablesFunctions(tables):
 
 						function_type_args = function_type_args.replace('::', '_')
 
+					found_dup = 0
+					for func, func_str, func_name, func_ret, func_args, real_funcname in functions:
+						if func_name == function_name:
+							found_dup += 1
+
 					#if calling_convention != '__fastcall':
 					#	function_string = f'virtual {return_type} {calling_convention} {function_name}('
 					#else:
 					#	function_string = f'virtual {return_type} {function_name}('
 
-					function_string = f'virtual {return_type} {function_name}('
+					if found_dup:
+						function_name_new = f'{function_name}{found_dup + 1}'
+					else:
+						function_name_new = function_name
 
-					if function_type_args:
+					function_string = f'virtual {return_type} {function_name_new}('
+
+					func_args = []
+
+					#if function_type_args:
+					if 0:
 						function_string += function_type_args + ') = 0;'
 					else:
 						for i, arg in enumerate(args):
-							arg_type = arg.dstr()
+							status, string = GetTypeString(arg)
+							if status & (string != '?'):
+								arg_type = string
+							else:
+								arg_type = arg.dstr()
+
+							end_arg_type = GetEndType(arg)
+							if end_arg_type.is_func() | (end_arg_type.is_int128() & arg.is_ptr()):
+								arg_type = 'void*'
+
+							arg_type = '*'.join(arg_type.rsplit(' *'))
+							if (arg_type == '_BOOL4') | (arg_type == 'BOOL'):
+								arg_type = 'bool'
+							elif arg_type == '_DWORD*':
+								arg_type = 'void*'
+							elif arg_type == '_BYTE*':
+								arg_type = 'unsigned char*'
+							elif arg_type == '_QWORD*':
+								arg_type = 'unsigned long long*'
+							elif arg_type == '_DWORD':
+								arg_type = 'unsigned int'
+
+							arg_type = arg_type.replace('::', '_').replace('class ', '').replace('struct ', '')
+
+							arg_type_str = arg_type.replace('const ', '').replace('volatile ', '').replace(' ', '').rsplit('&')[0].rsplit('*')[0].strip()
+							is_known = False
+							for known_table_type, known_table_name, known_table_address, known_table_functions in tables:
+								if known_table_name == arg_type_str:
+									is_known = True
+									break
+
+							if is_known != True:
+								status, string = IsKnownType(arg.dstr().replace('::', '_').replace('class ', '').replace('struct ', ''))
+								if status & (string != '?'):
+									if string not in declare:
+										declare.append(string)
+								else:
+									narg = arg
+									while narg.is_ptr():
+										narg = narg.get_pointed_object()
+									if (narg.is_arithmetic() | narg.is_sse_type() | narg.is_func() | narg.is_void()) != True:
+										narg = narg.dstr().replace('::', '_').replace('class ', '').replace('struct ', '').replace('const ', '').replace('volatile ', '').replace(' ', '').rsplit('&')[0].rsplit('*')[0].strip()
+										if narg not in declare:
+											declare.append(narg)
+							else:
+								if arg_type_str not in include:
+									include.append(arg_type_str)
+
 							if i >= len(args) - 1:
 								function_string += f'{arg_type}'
 							else:
 								function_string += f'{arg_type}, '
+
+							func_args.append(arg_type)
 						function_string += ') = 0;'
 
-					functions.append((function, function_string))
+					functions.append((function, function_string, function_name, return_type, func_args, function_name_new))
+
+					is_exist = False
+					for rettype, name, args in known_functions:
+						if name == function_name:
+							is_exist = True
+							break
+
+					if is_exist != True:
+						known_functions.append((return_type, function_name, func_args))
+
 			except ida_hexrays.DecompilationFailure:
-				functions.append((function, f'virtual void FailedToDecompile_{function_name}() = 0;'))
+				functions.append((function, f'virtual void FailedToDecompile_{function_name}() = 0;', function_name, return_type, []))
 
 		if functions:
+
+			for index, (func, string, name, rettype, args, realname) in enumerate(functions):
+				for known_rettype, known_name, known_args in known_functions:
+					if name == known_name:
+						if known_rettype != rettype:
+							args_string = ', '.join(args)
+							functions[index] = (func, f'virtual {known_rettype} {realname}({args_string}) = 0; // Fixed return type', name, known_rettype, args, realname)
+						break
+
 			decompiled.append((table_type, table_name, table_address, functions))
 
 	return decompiled
@@ -523,8 +664,8 @@ def GetBasesNames(bases, names = None):
 	if names == None:
 		names = set()
 	for type, name, base_types in bases:
-		if base_types:
-			GetBasesNames(base_types, names)
+		# if base_types:
+		# 	GetBasesNames(base_types, names)
 		names.add(name)
 	return names
 
@@ -571,37 +712,70 @@ class VirtualTableDump(ida_idaapi.plugin_t):
 			idc.msg(f'[VirtualTableDump] Info: Found {len(tables)} virtual tables.\n')
 
 			if tables:
-				tables = DecompileVirtualTablesFunctions(tables)
+				declare = []
+				include = []
+				tables = DecompileVirtualTablesFunctions(tables, declare, include)
 				idc.msg(f'[VirtualTableDump] Info: Decompiled {len(tables)} virtual tables.\n')
 
 				if tables:
 
 					known_bases = []
-					code_bases = ''
+					known_tables = []
+					code_bases = '\n'
 					code = ''
+
+					if include:
+						for inc in include:
+							code_bases += f'class {inc};\n'
+
+						code_bases += '\n'
+
+					if declare:
+						for decl in declare:
+							code_bases += f'class {decl} ' + '{};\n'
+
+						code_bases += '\n'
 
 					for type, name, base_types in found_types:
 						for table_type, table_name, table_address, table_functions in tables:
+
+							if table_name in known_tables:
+								continue
+
 							if type == table_type:
 								bases = GetBasesNames(base_types)
-								base_is_known = False
-								for base in bases:
-									for known_base in known_bases:
-										if base == known_base:
-											base_is_known = True
-											break
-								known_bases.extend(bases)
 								if bases:
 									bases_public = []
 									for base in bases:
+										base_is_known = False
+										for known_base in known_bases:
+											if base == known_base:
+												base_is_known = True
+												break
+										if base_is_known != True:
+											for known_base in include:
+												if base == known_base:
+													base_is_known = True
+													break
+											if base_is_known != True:
+												for known_base in declare:
+													if base == known_base:
+														base_is_known = True
+														break
+										known_bases.append(base)
 										found_base = False
 										for known_type, known_name, known_address, known_functions in tables:
 											if base == known_name:
 												if known_functions:
 													found_base = True
 												break
-										if (found_base != True) & (base_is_known != True):
-											code_bases += f'class {base}' + ' {};\n'
+										if base_is_known != True:
+											if found_base != True:
+												code_bases += f'class {base}' + ' {};\n'
+											else:
+												code_bases += f'class {base}; // Unexpected include\n'
+										#if base == 'ConVar':
+										#	print(f'ConVar = {found_base} {base_is_known}')
 										bases_public.append(f'public {base}')
 
 									bases_public = ', '.join(bases_public)
@@ -610,7 +784,9 @@ class VirtualTableDump(ida_idaapi.plugin_t):
 								else:
 									code += f'class {table_name} ' + '{\n'
 
-								for function, function_name in table_functions:
+								known_tables.append(table_name)
+
+								for function, function_name, real_function_name, func_ret, func_args, real_funcname in table_functions:
 									code += '\t' + function_name + '\n'
 
 								code += '};\n\n'
