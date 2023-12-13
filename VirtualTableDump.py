@@ -101,7 +101,7 @@ def SearchBaseTypes(search_type:int, main_type:int = 0):
 				continue
 
 			number_of_bases = ida_bytes.get_dword(search_type_ref_address + 4)
-			if number_of_bases == 0:
+			if (number_of_bases == 0) | (number_of_bases > 0x4000):
 				continue
 
 			if IS_64:
